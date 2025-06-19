@@ -46,6 +46,62 @@ class KiCadWakaTime:
         logger.info("KiCad WakaTime initialized")
         logger.info(f"WakaTime CLI path: {self.wakatime_cli}")
 
+    def get_curr_prj_dir(self, project_name: str):
+        """Read from %appdata%/kicad\9.0\kicad.json and find the project directory using the project name and json.system.file_history"""
+        import json
+        
+        try:
+            # Determine config directory based on OS
+            if platform.system() == 'Windows':
+                appdata = os.environ.get('APPDATA')
+                if appdata is None:
+                    raise Exception("APPDATA environment variable not found")
+                config_dir = os.path.join(appdata, 'kicad')
+            # elif platform.system() == 'Darwin':  # macOS
+            #     config_dir = os.path.expanduser('~/Library/Preferences/kicad')
+            else:  # Linux and others
+                # config_dir = os.path.expanduser('~/.config/kicad')
+                logger.warning("Linux/macOS support is not implemented yet. Only Windows is supported for now.")
+                return None
+            
+            # Try to find the KiCad config in different version folders
+            kicad_config = None
+            version_dirs = ['9.0', '8.0', '7.0', '6.0']
+            
+            for version in version_dirs:
+                version_dir = os.path.join(config_dir, version)
+                if os.path.exists(version_dir):
+                    for config_file in ['kicad.json']:
+                        config_path = os.path.join(version_dir, config_file)
+                        if os.path.exists(config_path):
+                            logger.debug(f"Found KiCad config at {config_path}")
+                            with open(config_path, 'r') as f:
+                                kicad_config = json.load(f)
+                                break
+                    if kicad_config:
+                        break
+            
+            if not kicad_config:
+                logger.warning(f"Could not find KiCad config in {config_dir} for versions {version_dirs}")
+                return None
+            
+            prj_file:str = kicad_config["system"]["open_projects"][0]
+
+            # Verify that the project name appears in the project file path
+            if project_name.lower() in prj_file.lower():
+                # Extract the directory containing the project file
+                prj_dir = os.path.dirname(prj_file)
+                logger.debug(f"Project directory found: {prj_dir}")
+                return prj_dir
+            else:
+                logger.warning(f"Project name '{project_name}' not found in project file path '{prj_file}'")
+                logger.warning("Please close all KiCad instances and try again.")
+                return None
+        
+        except Exception as e:
+            logger.error(f"Error matching project directory: {str(e)}")
+            return None
+
     def load_wakatime_config(self):
         """Load API key and URL from ~/.wakatime.cfg"""
         config = configparser.ConfigParser()
@@ -93,7 +149,10 @@ class KiCadWakaTime:
                 # First try the old format pattern
                 old_format = re.search(r'([^\s/\\]+\.(kicad_pcb|sch|kicad_sch|kicad_pro))(?:\s+-\s+|\s+\[\*\]\s+-\s+)', window_title)
                 if old_format:
-                    return old_format.group(1)
+                    filename = old_format.group(1)
+                    # Extract project name from filename (remove extension)
+                    project_name = os.path.splitext(filename)[0]
+                    return (filename, project_name)
                 
                 # Try new format: "{if unsaved: * else ""} {project name} — {editor type}"
                 new_format = re.search(r'(\*?)([^\s—]+)\s+—\s+(.+)', window_title)
@@ -101,29 +160,38 @@ class KiCadWakaTime:
                     is_unsaved = new_format.group(1) == '*'
                     project_name = new_format.group(2).strip()
                     editor_type = new_format.group(3).strip()
+
+                    file_path = str(self.get_curr_prj_dir(project_name)) + "\\" + project_name
                     
                     # Map editor type to file extension
                     if 'PCB Editor' in editor_type:
-                        return f"{project_name}.kicad_pcb"
+                        file_path = f"{file_path}.kicad_pcb"
                     elif 'Schematic Editor' in editor_type:
-                        return f"{project_name}.kicad_sch"
+                        file_path = f"{file_path}.kicad_sch"
                     elif 'KiCad' in editor_type:
-                        return f"{project_name}.kicad_pro"
+                        file_path = f"{file_path}.kicad_pro"
                     elif 'Symbol Editor' in editor_type:
-                        return f"{project_name}.kicad_sym"
+                        logger.warning("Symbol Editor detected file path may not be correct")
+                        file_path = f"{file_path}.kicad_sym"
                     elif 'Footprint Editor' in editor_type:
-                        return f"{project_name}.kicad_mod"
+                        logger.warning("Footprint Editor detected file path may not be correct")
+                        file_path = f"{file_path}.kicad_mod"
+
+                    return (file_path, project_name)
+                
             
             return None
         except Exception as e:
             logger.error(f"Error getting active window: {str(e)}")
             return None
 
-    def send_heartbeat(self, file):
+    def send_heartbeat(self, file_info: tuple):
         """Send heartbeat data to WakaTime"""
         if not os.path.exists(self.wakatime_cli) and not self.dry_run:
             logger.error(f"WakaTime CLI not found at {self.wakatime_cli}")
             return
+        
+        file, project_name = file_info
         
         now = time.time()
         if file != self.last_file or now - self.last_heartbeat_at > self.heartbeat_frequency:
@@ -134,6 +202,7 @@ class KiCadWakaTime:
                 self.wakatime_cli,
                 '--entity', file,
                 '--plugin', 'kicad-wakatime/0.1.0',
+                '--project', project_name,
                 '--language', 'KiCad',
                 '--key', self.api_key
             ]

@@ -13,11 +13,13 @@ Track your KiCad design time with WakaTime.
 - [ ] Add configuration menu to set WakaTime API key and URL
 - [ ] Test on other KiCad versions
 - [ ] Add support for Mac and Linux
+- [ ] Mouse and keyboard activity tracking
 
 ## Requirements
 
 - WakaTime account with API key and URL configured
 - WakaTime CLI installed (`~/.wakatime/wakatime-cli.*`)
+- KiCad 9+ (or with IPC support)
 
 ### Tested on
 - KiCad 9.0.0
