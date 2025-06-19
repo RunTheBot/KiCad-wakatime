@@ -11,16 +11,100 @@ import logging
 import psutil
 import argparse
 import sys
+from threading import Thread, Lock
+from datetime import datetime
 
+# Add pynput for mouse and keyboard tracking
+try:
+    from pynput import mouse, keyboard
+    ACTIVITY_TRACKING_AVAILABLE = True
+except ImportError:
+    ACTIVITY_TRACKING_AVAILABLE = False
+    
 # Setup logging will be initialized later after parsing command line arguments
 logger = logging.getLogger('kicad-wakatime')
 
+class UserActivityTracker:
+    def __init__(self, inactivity_threshold=60):
+        self.last_activity_time = time.time()
+        self.inactivity_threshold = inactivity_threshold
+        self.is_active = True
+        self.lock = Lock()
+        self.tracking_enabled = ACTIVITY_TRACKING_AVAILABLE
+        
+        if not self.tracking_enabled:
+            logger.warning("Activity tracking not available: pynput module not found")
+            logger.warning("Install pynput with: pip install pynput")
+            logger.warning("Running without activity tracking")
+            return
+            
+        # Start listeners in separate threads
+        self.mouse_listener = mouse.Listener(on_move=self.on_activity, 
+                                           on_click=self.on_activity, 
+                                           on_scroll=self.on_activity)
+        self.keyboard_listener = keyboard.Listener(on_press=self.on_activity)
+        
+        self.mouse_listener.daemon = True
+        self.keyboard_listener.daemon = True
+        
+        self.mouse_listener.start()
+        self.keyboard_listener.start()
+        
+        logger.info("User activity tracking started")
+        
+    def on_activity(self, *args, **kwargs):
+        """Callback for any mouse or keyboard activity"""
+        # logger.debug("User activity detected")
+        with self.lock:
+            self.last_activity_time = time.time()
+            self.is_active = True
+    
+    def check_activity(self):
+        """Check if user is currently active based on recent input"""
+        if not self.tracking_enabled:
+            logger.warning("Activity tracking not enabled, assuming user is active")
+            return True  # Assume active if tracking not available
+            
+        with self.lock:
+            current_time = time.time()
+            time_since_activity = current_time - self.last_activity_time
+
+            # logger.debug(f"Time since last activity: {time_since_activity:.1f} seconds")
+
+            logger.debug(f"User has been inactive for {time_since_activity:.1f} seconds out of threshold {self.inactivity_threshold} seconds")
+            
+            # Update active status if we've exceeded the threshold
+            if time_since_activity > self.inactivity_threshold:
+                if self.is_active:
+                    logger.info(f"User inactive for {time_since_activity:.1f} seconds, threshold is {self.inactivity_threshold} seconds")
+                self.is_active = False
+            
+            return self.is_active
+    
+    def get_time_since_activity(self):
+        """Return seconds since last activity"""
+        if not self.tracking_enabled:
+            return 0  # Assume just active if tracking not available
+            
+        with self.lock:
+            return time.time() - self.last_activity_time
+            
+    def stop(self):
+        """Stop the activity tracking"""
+        if self.tracking_enabled:
+            self.mouse_listener.stop()
+            self.keyboard_listener.stop()
+            logger.info("User activity tracking stopped")
+
 class KiCadWakaTime:
-    def __init__(self, dry_run=False):
+    def __init__(self, dry_run=False, inactivity_threshold=60):
         self.last_heartbeat_at = 0
         self.last_file = None
-        self.heartbeat_frequency = 120  # seconds
+        self.heartbeat_frequency = 60  # seconds
         self.dry_run = dry_run
+        
+        # Initialize activity tracker
+        self.activity_tracker = UserActivityTracker(inactivity_threshold)
         
         if dry_run:
             logger.info("Running in dry run mode - no heartbeats will be sent")
@@ -47,7 +131,7 @@ class KiCadWakaTime:
         logger.info(f"WakaTime CLI path: {self.wakatime_cli}")
 
     def get_curr_prj_dir(self, project_name: str):
-        """Read from %appdata%/kicad\9.0\kicad.json and find the project directory using the project name and json.system.file_history"""
+        """Read from %appdata%/kicad\\9.0\\kicad.json and find the project directory using the project name and json.system.file_history"""
         import json
         
         try:
@@ -194,7 +278,12 @@ class KiCadWakaTime:
         file, project_name = file_info
         
         now = time.time()
-        if file != self.last_file or now - self.last_heartbeat_at > self.heartbeat_frequency:
+        is_user_active = self.activity_tracker.check_activity()
+        
+        # Only send heartbeat if:
+        # 1. The file changed, OR
+        # 2. Time since last heartbeat exceeds frequency AND user is active
+        if (file != self.last_file) or (now - self.last_heartbeat_at > self.heartbeat_frequency and is_user_active):
             self.last_heartbeat_at = now
             self.last_file = file
             
@@ -214,12 +303,16 @@ class KiCadWakaTime:
                 logger.info(f"DRY RUN: Would send heartbeat for {file}")
                 logger.info(f"DRY RUN: Command: {' '.join(cmd)}")
             else:
-                logger.info(f"Sending heartbeat for file: {file}")
+                activity_status = "ACTIVE" if is_user_active else "INACTIVE"
+                seconds_since_activity = self.activity_tracker.get_time_since_activity()
+                logger.info(f"Sending heartbeat for file: {file} (User: {activity_status}, {seconds_since_activity:.1f}s since activity)")
                 try:
                     subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
                     logger.info(f"Heartbeat sent for {file}")
                 except Exception as e:
                     logger.error(f"Error sending heartbeat: {str(e)}")
+        elif not is_user_active:
+            logger.debug(f"Skipping heartbeat: User inactive for {self.activity_tracker.get_time_since_activity():.1f}s")
 
     def run(self):
         print("Starting KiCad WakaTime integration...")
@@ -233,14 +326,20 @@ class KiCadWakaTime:
                 time.sleep(5)  # Check every 5 seconds
         except KeyboardInterrupt:
             logger.info("KiCad WakaTime monitor stopped")
+            self.activity_tracker.stop()
         except Exception as e:
             logger.error(f"Error in main loop: {str(e)}")
+            self.activity_tracker.stop()
 
 if __name__ == "__main__":
     try:
         # Parse command line arguments
         parser = argparse.ArgumentParser(description='KiCad WakaTime integration')
         parser.add_argument('--dry-run', action='store_true', help='Run without sending actual heartbeats')
+        
+        # Add activity tracking options
+        parser.add_argument('--inactivity-threshold', type=int, default=60,
+                           help='Time in seconds after which user is considered inactive (default: 300)')
         
         # Add logging options
         parser.add_argument('--log-level', choices=['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL'],
@@ -292,7 +391,8 @@ if __name__ == "__main__":
         if not args.no_file_log:
             logger.info(f"Logging to file: {log_file}")
         
-        kicad_wakatime = KiCadWakaTime(dry_run=args.dry_run)
+        kicad_wakatime = KiCadWakaTime(dry_run=args.dry_run, 
+                                       inactivity_threshold=args.inactivity_threshold)
         kicad_wakatime.run()
     except Exception as e:
         # Ensure there's at least a basic logger for errors

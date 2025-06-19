@@ -1,3 +1,5 @@
 configparser
 psutil
+pynput
+kicad-python
 pywin32; platform_system == "Windows"
