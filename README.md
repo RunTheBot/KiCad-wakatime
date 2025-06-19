@@ -24,7 +24,7 @@ The script reads the KiCad config that conviniently lists the absolute path of t
 - [ ] Add configuration menu to set WakaTime API key and URL
 - [ ] Test on other KiCad versions
 - [ ] Add support for Mac and Linux
-- [ ] Mouse and keyboard activity tracking
+- [X] Mouse and keyboard activity tracking
 - [ ] Actually use KiCad IPC to get active window
 
 ## Known Issues
