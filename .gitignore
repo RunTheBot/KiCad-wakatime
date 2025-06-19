@@ -1,0 +1,6 @@
+.venv
+.vscode
+__pycache__
+build
+dist
+kicad_wakatime.spec
