@@ -2,6 +2,10 @@
 
 Track your KiCad design time with WakaTime.
 
+## Pay attention to console warnings otherwise your your time will not be tracked!
+
+See [Known Issues](#known-issues) for more information.
+
 ## Features
 
 - Tracks active KiCad windows
